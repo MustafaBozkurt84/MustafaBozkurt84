@@ -1,4 +1,5 @@
-![snake svg](https://github.com/MustafaBozkurt84/MustafaBozkurt84/blob/output/github-contribution-grid-snake.svg)
+![snake](https://raw.githubusercontent.com/MustafaBozkurt84/output/github-contribution-grid-snake.svg)
+
 
 # Mustafa Bozkurt  
 
