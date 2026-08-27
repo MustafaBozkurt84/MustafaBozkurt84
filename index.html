@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>PIPELINE RUN</title>
+<meta name="description" content="A tiny 3D endless runner about keeping a data pipeline alive. No engine, no dependencies.">
+<style>
+  :root { color-scheme: dark; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { height:100%; background:#05070a; overflow:hidden; }
+  body {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    color:#cfe3dd; -webkit-font-smoothing:antialiased;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+  }
+  #stage { position:fixed; inset:0; }
+  canvas { display:block; width:100%; height:100%; }
+
+  /* scanlines + vignette, drawn over the canvas */
+  #grain {
+    position:fixed; inset:0; pointer-events:none;
+    background:
+      repeating-linear-gradient(180deg, rgba(0,0,0,.30) 0 1px, rgba(0,0,0,0) 1px 3px),
+      radial-gradient(120% 90% at 50% 45%, rgba(0,0,0,0) 40%, rgba(0,0,0,.72) 100%);
+    mix-blend-mode:multiply;
+  }
+
+  .overlay {
+    position:fixed; inset:0; display:grid; place-items:center;
+    padding:24px; text-align:center; pointer-events:none;
+  }
+  .panel {
+    max-width:min(560px, 92vw);
+    border:1px solid rgba(120,220,190,.28);
+    background:linear-gradient(180deg, rgba(8,14,18,.94), rgba(6,10,13,.94));
+    box-shadow:0 0 0 1px rgba(0,0,0,.6), 0 24px 60px rgba(0,0,0,.7);
+    padding:26px 26px 22px;
+  }
+  .panel h1 {
+    font-size:clamp(22px, 5.4vw, 34px); letter-spacing:.22em;
+    font-weight:600; color:#7ff0c6; margin-bottom:6px;
+  }
+  .panel .sub { font-size:12px; letter-spacing:.16em; color:#6d8a84; margin-bottom:18px; }
+  .panel p { font-size:13px; line-height:1.7; color:#9fb8b2; }
+  .panel .keys { margin:16px 0 4px; font-size:12.5px; color:#cfe3dd; letter-spacing:.05em; }
+  kbd {
+    display:inline-block; min-width:26px; padding:3px 7px; margin:0 2px;
+    border:1px solid rgba(140,220,195,.35); border-bottom-width:2px;
+    background:rgba(20,34,32,.8); color:#8ff0cd; font:inherit; font-size:11px;
+  }
+  .blink { animation:blink 1.15s steps(2,end) infinite; }
+  @keyframes blink { 50% { opacity:.18 } }
+  .stat-row { display:flex; gap:26px; justify-content:center; margin:14px 0 4px; }
+  .stat-row div { font-size:11px; letter-spacing:.14em; color:#6d8a84; }
+  .stat-row b { display:block; font-size:22px; color:#e6fff5; letter-spacing:.02em; margin-top:4px; font-weight:600; }
+  .fail h1 { color:#ff6f6f; }
+  .fail .panel { border-color:rgba(255,110,110,.32); }
+  #back {
+    position:fixed; left:14px; bottom:12px; font-size:11px; letter-spacing:.12em;
+    color:#4d6763; text-decoration:none; z-index:5;
+  }
+  #back:hover { color:#7ff0c6; }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="c"></canvas></div>
+<div id="grain"></div>
+
+<div class="overlay" id="intro">
+  <div class="panel">
+    <h1>PIPELINE&nbsp;RUN</h1>
+    <div class="sub">A BAD DAY IN PRODUCTION</div>
+    <p>Records are coming down the pipe faster than anyone planned.
+       Ride them, catch what you can, and stay off the nulls —
+       three of those and the whole thing lands in the dead letter queue.</p>
+    <div class="keys">
+      <kbd>&larr;</kbd><kbd>&rarr;</kbd> or <kbd>A</kbd><kbd>D</kbd> switch lane
+      &nbsp;·&nbsp; <kbd>P</kbd> pause
+    </div>
+    <div class="keys blink" style="color:#7ff0c6">press SPACE to deploy</div>
+  </div>
+</div>
+
+<div class="overlay fail hidden" id="gameover">
+  <div class="panel">
+    <h1>PIPELINE&nbsp;FAILED</h1>
+    <div class="sub">JOB EXITED WITH STATUS 1</div>
+    <div class="stat-row">
+      <div>RECORDS<b id="f-score">0</b></div>
+      <div>PEAK COMBO<b id="f-combo">x1</b></div>
+      <div>DISTANCE<b id="f-dist">0m</b></div>
+    </div>
+    <div class="keys blink" style="color:#ff9a9a">press SPACE to redeploy</div>
+  </div>
+</div>
+
+<a id="back" href="https://github.com/MustafaBozkurt84">&larr; back to the profile</a>
+
+<script>
+(() => {
+  'use strict';
+
+  const cvs = document.getElementById('c');
+  const ctx = cvs.getContext('2d', { alpha: false });
+  const intro = document.getElementById('intro');
+  const gameover = document.getElementById('gameover');
+  const backLink = document.getElementById('back');
+
+  const params = new URLSearchParams(location.search);
+  const AUTOPILOT = params.has('auto');     // used to record the preview loop
+  const CLEAN = params.has('clean');        // hide chrome while recording
+
+  if (CLEAN) {
+    backLink.style.display = 'none';
+    document.getElementById('grain').style.display = 'none';  // keeps the recorded gif small
+  }
+
+  // ---- world constants -----------------------------------------------------
+  const LANES = [-1.95, 0, 1.95];
+  const FLOOR = -2.35;
+  const CEIL  =  2.35;
+  const WALL  =  4.20;      // half-width of the pipe
+  const PZ    = 11.0;       // player's fixed distance from the camera
+  const FAR   =  150;
+  const RING_GAP = 3.8;
+
+  let W = 0, H = 0, CX = 0, CY = 0, F = 0, DPR = 1;
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = Math.floor(innerWidth  * DPR);
+    H = Math.floor(innerHeight * DPR);
+    cvs.width = W; cvs.height = H;
+    CX = W / 2;
+    CY = H * 0.470;
+    F  = Math.min(W * 0.86, H * 1.52);   // focal length, keeps the pipe framed
+  }
+  addEventListener('resize', resize, { passive: true });
+  resize();
+
+  const proj = (x, y, z) => {
+    const s = F / z;
+    return [CX + x * s, CY - y * s, s];
+  };
+
+  // ---- state ---------------------------------------------------------------
+  const S = { INTRO: 0, RUN: 1, DEAD: 2, PAUSE: 3 };
+  let state = S.INTRO;
+
+  let lane, laneX, retries, score, combo, peakCombo, dist, speed, shake, flash, invuln, t;
+  let obstacles, records, sparks, streaks;
+  let spawnZ;
+
+  function reset() {
+    lane = 1; laneX = 0;
+    retries = 3; score = 0; combo = 1; peakCombo = 1;
+    dist = 0; speed = 27; shake = 0; flash = 0; invuln = 0; t = 0;
+    obstacles = []; records = []; sparks = []; streaks = [];
+    spawnZ = 12;
+    for (let z = 34; z < FAR; z += 15) spawnBar(z);
+    for (let i = 0; i < 26; i++) streaks.push(newStreak(Math.random() * FAR));
+  }
+
+  const newStreak = (z) => ({
+    a: Math.random() * Math.PI * 2,
+    r: WALL * (0.72 + Math.random() * 0.3),
+    z, len: 6 + Math.random() * 22
+  });
+
+  // ---- level generation ----------------------------------------------------
+  // A pattern is one "bar" of the level: which lanes are blocked, which carry
+  // records. Kept hand-written so the run has rhythm instead of noise.
+  const PATTERNS = [
+    { nulls: [0],       recs: [1, 2] },
+    { nulls: [2],       recs: [0, 1] },
+    { nulls: [1],       recs: [0, 2] },
+    { nulls: [0, 1],    recs: [2]    },
+    { nulls: [1, 2],    recs: [0]    },
+    { nulls: [0, 2],    recs: [1]    },
+    { nulls: [],        recs: [0, 1, 2] },
+    { nulls: [2],       recs: [2]    },   // record tucked behind the null
+    { nulls: [0],       recs: [0]    },
+  ];
+
+  function spawnBar(z) {
+    // early on, keep it gentle: no double blocks for the first stretch
+    const pool = dist < 260
+      ? PATTERNS.filter(p => p.nulls.length < 2)
+      : PATTERNS;
+    const p = pool[(Math.random() * pool.length) | 0];
+
+    for (const l of p.nulls) obstacles.push({ lane: l, z, spin: Math.random() * 6 });
+    for (const l of p.recs) {
+      // records behind a null in the same lane sit slightly further back
+      const off = p.nulls.includes(l) ? 6.5 : 0;
+      records.push({ lane: l, z: z + off, spin: Math.random() * 6, got: false });
+    }
+  }
+
+  // ---- input ---------------------------------------------------------------
+  function move(dir) {
+    if (state !== S.RUN) return;
+    const n = Math.max(0, Math.min(2, lane + dir));
+    if (n !== lane) { lane = n; sparkBurst(LANES[lane], FLOOR + .2, PZ, '#3f6b64', 6); }
+  }
+
+  function start() {
+    reset();
+    state = S.RUN;
+    intro.classList.add('hidden');
+    gameover.classList.add('hidden');
+  }
+
+  addEventListener('keydown', (e) => {
+    const k = e.key.toLowerCase();
+    if (k === 'arrowleft'  || k === 'a') { move(-1); e.preventDefault(); }
+    if (k === 'arrowright' || k === 'd') { move(1);  e.preventDefault(); }
+    if (k === ' ' || k === 'enter') {
+      e.preventDefault();
+      if (state === S.INTRO || state === S.DEAD) start();
+    }
+    if (k === 'p' && (state === S.RUN || state === S.PAUSE)) {
+      state = state === S.RUN ? S.PAUSE : S.RUN;
+    }
+  });
+
+  addEventListener('pointerdown', (e) => {
+    if (state === S.INTRO || state === S.DEAD) { start(); return; }
+    move(e.clientX < innerWidth / 2 ? -1 : 1);
+  });
+
+  // ---- effects -------------------------------------------------------------
+  function sparkBurst(x, y, z, color, n) {
+    for (let i = 0; i < n; i++) {
+      sparks.push({
+        x, y, z, color,
+        vx: (Math.random() - .5) * 5,
+        vy: Math.random() * 4 + .5,
+        vz: (Math.random() - .5) * 4,
+        life: 1
+      });
+    }
+  }
+
+  // ---- drawing helpers -----------------------------------------------------
+  function cubeVerts(x, y, z, h) {
+    const v = [];
+    for (const dz of [-h, h])
+      for (const dy of [-h, h])
+        for (const dx of [-h, h]) v.push(proj(x + dx, y + dy, z + dz));
+    return v;   // index = dz*4 + dy*2 + dx
+  }
+
+  const CUBE_EDGES = [
+    [0,1],[1,3],[3,2],[2,0], [4,5],[5,7],[7,6],[6,4], [0,4],[1,5],[2,6],[3,7]
+  ];
+
+  function strokeCube(x, y, z, h, color, alpha, lw) {
+    if (z < 1.2) return;
+    const v = cubeVerts(x, y, z, h);
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = alpha;
+    ctx.lineWidth = lw * DPR;
+    ctx.beginPath();
+    for (const [a, b] of CUBE_EDGES) {
+      ctx.moveTo(v[a][0], v[a][1]);
+      ctx.lineTo(v[b][0], v[b][1]);
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  function fillFace(v, idx, color, alpha) {
+    ctx.fillStyle = color; ctx.globalAlpha = alpha;
+    ctx.beginPath();
+    ctx.moveTo(v[idx[0]][0], v[idx[0]][1]);
+    for (let i = 1; i < idx.length; i++) ctx.lineTo(v[idx[i]][0], v[idx[i]][1]);
+    ctx.closePath(); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  const fade = (z) => Math.max(0, Math.min(1, 1 - (z - 8) / (FAR * 0.94)));
+
+  // ---- the pipe ------------------------------------------------------------
+  function drawPipe(scroll) {
+    // longitudinal corner rails
+    const corners = [[-WALL, FLOOR], [WALL, FLOOR], [WALL, CEIL], [-WALL, CEIL]];
+    ctx.lineWidth = 1.1 * DPR;
+    for (const [x, y] of corners) {
+      const a = proj(x, y, 3.2), b = proj(x, y, FAR);
+      const g = ctx.createLinearGradient(a[0], a[1], b[0], b[1]);
+      g.addColorStop(0, 'rgba(112,222,190,.72)');
+      g.addColorStop(1, 'rgba(96,196,170,0)');
+      ctx.strokeStyle = g;
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+    }
+
+    // lane separators on the floor
+    for (const x of [-0.98, 0.98]) {
+      const a = proj(x, FLOOR, 4), b = proj(x, FLOOR, FAR);
+      const g = ctx.createLinearGradient(a[0], a[1], b[0], b[1]);
+      g.addColorStop(0, 'rgba(88,190,166,.48)');
+      g.addColorStop(1, 'rgba(70,150,132,0)');
+      ctx.strokeStyle = g; ctx.lineWidth = 1 * DPR;
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+    }
+
+    // rings, far to near
+    const first = RING_GAP - (scroll % RING_GAP);
+    for (let z = FAR; z > 3.4; z -= RING_GAP) {
+      const zz = z - (RING_GAP - first);
+      if (zz < 3.4) continue;
+      const f = fade(zz);
+      if (f <= 0.02) continue;
+      const pts = corners.map(([x, y]) => proj(x, y, zz));
+      // every 4th ring is a brighter "checkpoint"
+      const strong = Math.abs(((zz + scroll) / RING_GAP) % 4) < 0.5;
+      ctx.strokeStyle = strong ? '#7ff0c6' : '#38867a';
+      ctx.globalAlpha = f * (strong ? 0.95 : 0.55);
+      ctx.lineWidth = (strong ? 1.5 : 1) * DPR;
+      ctx.beginPath();
+      ctx.moveTo(pts[0][0], pts[0][1]);
+      for (let i = 1; i < 4; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+      ctx.closePath(); ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function drawStreaks(dt) {
+    ctx.lineWidth = 1 * DPR;
+    for (const s of streaks) {
+      s.z -= speed * dt * 1.35;
+      if (s.z < 3) { Object.assign(s, newStreak(FAR + Math.random() * 30)); continue; }
+      const x = Math.cos(s.a) * s.r, y = Math.sin(s.a) * s.r * 0.72;
+      const a = proj(x, y, s.z), b = proj(x, y, s.z + s.len);
+      ctx.strokeStyle = 'rgba(120,235,200,' + (fade(s.z) * 0.16).toFixed(3) + ')';
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+    }
+  }
+
+  // ---- entities ------------------------------------------------------------
+  function drawNull(o) {
+    const f = fade(o.z);
+    if (f <= 0.02) return;
+    const x = LANES[o.lane], y = FLOOR + 0.95, h = 0.92;
+    const v = cubeVerts(x, y, o.z, h);
+    fillFace(v, [0,1,3,2], '#3a0d14', 0.85 * f);          // near face
+    strokeCube(x, y, o.z, h, '#ff5d5d', (0.45 + 0.55 * f), 1.4);
+    // a small "null" tag on close blocks
+    if (o.z < 46) {
+      const p = proj(x, y + 1.5, o.z);
+      ctx.fillStyle = 'rgba(255,120,120,' + (f * 0.85).toFixed(2) + ')';
+      ctx.font = (11 * DPR * Math.min(1.6, 30 / o.z)) + 'px ui-monospace, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('NULL', p[0], p[1]);
+    }
+  }
+
+  function drawRecord(r) {
+    const f = fade(r.z);
+    if (f <= 0.02) return;
+    const x = LANES[r.lane], y = FLOOR + 1.15 + Math.sin(t * 2.6 + r.spin) * 0.16;
+    const s = F / r.z;
+    const p = proj(x, y, r.z);
+    const rad = 0.30 * s;
+
+    ctx.save();
+    ctx.translate(p[0], p[1]);
+    ctx.rotate(t * 1.7 + r.spin);
+    ctx.globalAlpha = 0.5 + 0.5 * f;
+    ctx.fillStyle = '#0e2b26';
+    ctx.strokeStyle = '#6ff0c8';
+    ctx.lineWidth = 1.4 * DPR;
+    ctx.beginPath();
+    ctx.moveTo(0, -rad); ctx.lineTo(rad, 0); ctx.lineTo(0, rad); ctx.lineTo(-rad, 0);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.restore();
+
+    // glow
+    ctx.globalAlpha = 0.07 * f;
+    ctx.fillStyle = '#6ff0c8';
+    ctx.beginPath(); ctx.arc(p[0], p[1], rad * 1.5, 0, 6.284); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  function drawPlayer() {
+    const y = FLOOR + 0.78 + Math.sin(t * 6) * 0.05;
+    const x = laneX;
+    const tilt = (LANES[lane] - laneX) * 0.16;
+    const h = 0.55;
+    const v = [];
+    for (const dz of [-h, h])
+      for (const dy of [-h, h])
+        for (const dx of [-h, h]) {
+          // roll the cube slightly into the turn
+          const rx = dx * Math.cos(tilt) - dy * Math.sin(tilt);
+          const ry = dx * Math.sin(tilt) + dy * Math.cos(tilt);
+          v.push(proj(x + rx, y + ry, PZ + dz));
+        }
+
+    const on = invuln <= 0 || Math.floor(t * 22) % 2 === 0;
+    if (!on) return;
+
+    fillFace(v, [0,1,3,2], '#0c3b32', 0.92);
+    fillFace(v, [1,5,7,3], '#082b25', 0.8);
+    ctx.strokeStyle = '#8dffd6';
+    ctx.lineWidth = 1.8 * DPR;
+    ctx.beginPath();
+    for (const [a, b] of CUBE_EDGES) { ctx.moveTo(v[a][0], v[a][1]); ctx.lineTo(v[b][0], v[b][1]); }
+    ctx.stroke();
+
+    // ground glow under the packet
+    const g = proj(x, FLOOR + 0.02, PZ);
+    const s = F / PZ;
+    const rg = ctx.createRadialGradient(g[0], g[1], 0, g[0], g[1], 0.9 * s);
+    rg.addColorStop(0, 'rgba(120,255,214,.30)');
+    rg.addColorStop(1, 'rgba(120,255,214,0)');
+    ctx.fillStyle = rg;
+    ctx.beginPath(); ctx.ellipse(g[0], g[1], 0.9 * s, 0.3 * s, 0, 0, 6.284); ctx.fill();
+  }
+
+  function drawSparks(dt) {
+    for (let i = sparks.length - 1; i >= 0; i--) {
+      const s = sparks[i];
+      s.life -= dt * 1.9;
+      if (s.life <= 0) { sparks.splice(i, 1); continue; }
+      s.x += s.vx * dt; s.y += s.vy * dt; s.z += s.vz * dt - speed * dt;
+      s.vy -= 7 * dt;
+      if (s.z < 1.5) { sparks.splice(i, 1); continue; }
+      const p = proj(s.x, s.y, s.z), sc = F / s.z;
+      ctx.fillStyle = s.color;
+      ctx.globalAlpha = Math.max(0, s.life);
+      ctx.fillRect(p[0], p[1], Math.max(1, 0.05 * sc), Math.max(1, 0.05 * sc));
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // ---- HUD -----------------------------------------------------------------
+  function drawHUD() {
+    const pad = 22 * DPR;
+    const fs = Math.max(11, 12 * DPR);
+    ctx.textAlign = 'left';
+    ctx.font = fs + 'px ui-monospace, monospace';
+
+    ctx.fillStyle = 'rgba(110,150,142,.75)';
+    ctx.fillText('RECORDS', pad, pad + fs);
+    ctx.fillStyle = '#e9fff8';
+    ctx.font = (fs * 2.3) + 'px ui-monospace, monospace';
+    ctx.fillText(String(score).padStart(4, '0'), pad, pad + fs * 3.3);
+
+    ctx.font = fs + 'px ui-monospace, monospace';
+    ctx.fillStyle = combo > 1 ? '#7ff0c6' : 'rgba(110,150,142,.6)';
+    ctx.fillText('COMBO  x' + combo, pad, pad + fs * 5);
+
+    // retries
+    ctx.fillStyle = 'rgba(110,150,142,.75)';
+    ctx.textAlign = 'right';
+    ctx.fillText('RETRIES', W - pad, pad + fs);
+    for (let i = 0; i < 3; i++) {
+      const w = 16 * DPR, h = 7 * DPR;
+      const x = W - pad - (3 - i) * (w + 5 * DPR) + 5 * DPR;
+      ctx.fillStyle = i < retries ? '#7ff0c6' : 'rgba(255,110,110,.28)';
+      ctx.fillRect(x, pad + fs * 1.6, w, h);
+    }
+    ctx.fillStyle = 'rgba(110,150,142,.55)';
+    ctx.fillText(Math.round(dist) + ' m  ·  ' + (speed * 0.1).toFixed(1) + ' MB/s',
+                 W - pad, pad + fs * 3.6);
+  }
+
+  // ---- loop ----------------------------------------------------------------
+  let last = performance.now();
+
+  function frame(now) {
+    let dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    if (state === S.PAUSE) dt = 0;
+    t += dt;
+
+    if (state === S.RUN) {
+      dist += speed * dt;
+      speed = Math.min(72, 27 + dist * 0.021);
+
+      // spawn one bar every ~14 units
+      spawnZ -= speed * dt;
+      if (spawnZ <= 0) { spawnBar(FAR + 8); spawnZ = 13 + Math.random() * 5; }
+
+      // autopilot picks the safest lane a few units ahead
+      if (AUTOPILOT) {
+        const risk = [0, 0, 0];
+        for (const o of obstacles) if (o.z > PZ && o.z < PZ + 34) risk[o.lane] += 60 - (o.z - PZ);
+        for (const r of records)   if (!r.got && r.z > PZ && r.z < PZ + 34) risk[r.lane] -= 8;
+        let best = lane;
+        for (let i = 0; i < 3; i++) {
+          if (Math.abs(i - lane) > 1) continue;               // one lane at a time
+          if (risk[i] < risk[best] - 2) best = i;
+        }
+        if (best !== lane) move(best > lane ? 1 : -1);
+      }
+
+      laneX += (LANES[lane] - laneX) * Math.min(1, dt * 13);
+      if (invuln > 0) invuln -= dt;
+      if (shake > 0) shake = Math.max(0, shake - dt * 3.2);
+      if (flash > 0) flash = Math.max(0, flash - dt * 2.6);
+
+      // move + resolve entities
+      for (let i = obstacles.length - 1; i >= 0; i--) {
+        const o = obstacles[i];
+        o.z -= speed * dt;
+        if (o.z < PZ - 1.4) { obstacles.splice(i, 1); continue; }
+        if (invuln <= 0 && o.lane === lane && Math.abs(o.z - PZ) < 1.15) {
+          retries--; invuln = 1.4; shake = 1; flash = 1; combo = 1;
+          sparkBurst(LANES[lane], FLOOR + 1, PZ, '#ff6a6a', 26);
+          obstacles.splice(i, 1);
+          if (retries <= 0) {
+            state = S.DEAD;
+            document.getElementById('f-score').textContent = score;
+            document.getElementById('f-combo').textContent = 'x' + peakCombo;
+            document.getElementById('f-dist').textContent = Math.round(dist) + 'm';
+            gameover.classList.remove('hidden');
+          }
+        }
+      }
+
+      for (let i = records.length - 1; i >= 0; i--) {
+        const r = records[i];
+        r.z -= speed * dt;
+        if (r.z < PZ - 1.4) { records.splice(i, 1); combo = 1; continue; }
+        if (r.lane === lane && Math.abs(r.z - PZ) < 1.0) {
+          score += combo;
+          combo = Math.min(5, combo + 1);
+          peakCombo = Math.max(peakCombo, combo);
+          sparkBurst(LANES[lane], FLOOR + 1.2, PZ, '#7ff0c6', 12);
+          records.splice(i, 1);
+        }
+      }
+    }
+
+    // ---- render ----
+    ctx.fillStyle = '#05070a';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    if (shake > 0) {
+      ctx.translate((Math.random() - .5) * 16 * shake * DPR,
+                    (Math.random() - .5) * 16 * shake * DPR);
+    }
+
+    // horizon haze
+    const hz = ctx.createRadialGradient(CX, CY, 0, CX, CY, Math.max(W, H) * 0.42);
+    hz.addColorStop(0, 'rgba(34,104,92,.50)');
+    hz.addColorStop(1, 'rgba(5,7,10,0)');
+    ctx.fillStyle = hz; ctx.fillRect(0, 0, W, H);
+
+    drawStreaks(state === S.RUN ? dt : dt * 0.25);
+    drawPipe(dist);
+
+    // painter's algorithm: everything sorted back to front
+    const ents = [];
+    for (const o of obstacles) ents.push([o.z, drawNull, o]);
+    for (const r of records)   ents.push([r.z, drawRecord, r]);
+    ents.sort((a, b) => b[0] - a[0]);
+    for (const [, fn, e] of ents) fn(e);
+
+    drawSparks(dt);
+    if (state !== S.INTRO) drawPlayer();
+    ctx.restore();
+
+    if (flash > 0) {
+      ctx.fillStyle = 'rgba(255,60,60,' + (flash * 0.20).toFixed(3) + ')';
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    if (state === S.RUN || state === S.PAUSE) drawHUD();
+
+    if (state === S.PAUSE) {
+      ctx.fillStyle = 'rgba(5,7,10,.6)'; ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = '#7ff0c6'; ctx.textAlign = 'center';
+      ctx.font = (18 * DPR) + 'px ui-monospace, monospace';
+      ctx.fillText('PAUSED', CX, CY);
+    }
+
+    requestAnimationFrame(frame);
+  }
+
+  reset();
+  if (AUTOPILOT) { start(); if (CLEAN) intro.classList.add('hidden'); }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
