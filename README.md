@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/MustafaBozkurt84/MustafaBozkurt84/master/assets/hero.svg" width="900" alt="Mustafa Bozkurt — Staff Data Engineer">
+  <img src="https://raw.githubusercontent.com/MustafaBozkurt84/MustafaBozkurt84/master/assets/hero.svg?v=2" width="900" alt="Mustafa Bozkurt — Staff Data Engineer">
 </p>
 
 Data engineer in Sweden, currently at **Optimizely**. Most of my work never gets a
