@@ -39,19 +39,6 @@ Both are in this repo if you want to pull them apart —
 
 <br>
 
-## A few repos
-
-| | |
-| --- | --- |
-| [**dag_templates_with_class**](https://github.com/MustafaBozkurt84/dag_templates_with_class) | Airflow DAGs generated from Python classes instead of copy-paste, with Docker Compose and tests around them |
-| [**predictive-maintanance-LSTM**](https://github.com/MustafaBozkurt84/predictive-maintanance-LSTM) | LSTMs for predictive maintenance on turbofan sensor data — classification, regression and anomaly variants |
-| [**big_data**](https://github.com/MustafaBozkurt84/big_data) | Working notes from the Hadoop side of the house: Spark, HDFS, YARN, Hive, Kafka, MLflow, Kubernetes |
-| [**car_price-streaming_prediction**](https://github.com/MustafaBozkurt84/car_price-streaming_prediction) | Scrape listings, train a price model, serve it — the whole loop end to end |
-| [**Docker_Deployment**](https://github.com/MustafaBozkurt84/Docker_Deployment) | A model behind a Flask API, containerised, back when that was still the hard part |
-| [**web_scraping**](https://github.com/MustafaBozkurt84/web_scraping) | An accumulated pile of scrapers — postcodes, geocoding, listings, news |
-
-<br>
-
 ## Elsewhere
 
 [LinkedIn](https://www.linkedin.com/in/mustafa-bozkurt-3405a91a5/) &nbsp;·&nbsp;
